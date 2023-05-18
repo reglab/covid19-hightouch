@@ -1,0 +1,2077 @@
+---
+title: "high-touch-code"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(estimatr)
+library(eeptools)
+library(lmtest)
+library(sandwich)
+library(clubSandwich)
+library(lubridate)
+library(plm)
+library(ggpubr)
+```
+
+Input files with individual patient data are not provided. Aggregated files `assignments.rds` and `scc_zip_svi.rds` are provided.
+
+```{r}
+assignments <- readRDS("assignments.rds")
+
+high_touch_staff <- get_high_touch_staff() # redacted
+cict <- read_csv("cict_combined.csv") %>% # redacted
+  distinct(Record.Number, .keep_all = T) %>%
+  select(
+    Record.Number,
+    Account.ID,
+    Opened.Date,
+    CalREDIE.Incident.ID..,
+    Record.Owner,
+    Person.Account..First.Name..,
+    Person.Account..Last.Name..,
+    Person.Account..Birthdate..,
+    Person.Account..Mailing.Street..,
+    Apartment.Number..,
+    Person.Account..Mailing.Zip.Postal.Code..,
+    Person.Account..Gender..,
+    Person..Hispanic..,
+    Race.and.Ethnicity,
+    Initial.Interview.Outcome,
+    If.yes..total.number.of.close.contacts.
+  ) %>%
+  mutate(
+    Opened.Date = as.Date(Opened.Date, format = "%m/%d/%Y"),
+    Week_Of = as.Date(cut(Opened.Date, "week")),
+    Person.Account..Mailing.Zip.Postal.Code.. = as.character(
+      Person.Account..Mailing.Zip.Postal.Code..
+    ),
+  ) %>%
+  rename(Zip = Person.Account..Mailing.Zip.Postal.Code..) %>%
+  left_join(assignments, by = c("Week_Of", "Zip")) %>%
+  filter(is.na(always_assigned) | !always_assigned) %>%
+  mutate(
+    D = ifelse(Record.Owner %in% high_touch_staff, 1, 0),
+    Z = ifelse(Type == "ASSIGNMENT", 1, 0),
+    completed_interview = !is.na(Initial.Interview.Outcome) & Initial.Interview.Outcome == "Completed",
+    refused_interview = !is.na(Initial.Interview.Outcome) & Initial.Interview.Outcome == "Refused to interview",
+    num_close_contacts = ifelse(If.yes..total.number.of.close.contacts. == 999, NA, If.yes..total.number.of.close.contacts.)
+  )
+```
+
+```{r}
+all_referrals <- get_referrals() # redacted
+resource_referrals <- get_resource_referrals() # redacted
+clinical_referrals <- get_clinical_referrals() # redacted
+records_with_rental_assistance <- get_records_with_rental_assistance() # redacted
+p_card_tracker <- get_p_card_tracker() # redacted
+```
+
+```{r}
+evaluation_data <- cict %>%
+  filter(
+    Week_Of >= "2021-02-15",
+    Week_Of <= "2021-05-17",
+  ) %>%
+  left_join(all_referrals) %>%
+  left_join(resource_referrals) %>%
+  left_join(clinical_referrals) %>%
+  mutate(
+    had_referral = ifelse(!grepl("NULL", referral_ids), 1, 0),
+    had_resource_referral = ifelse(!grepl("NULL", resource_referral_ids), 1, 0),
+    had_clinical_referral = ifelse(!grepl("NULL", clinical_referral_ids), 1, 0),
+    had_food_referral = ifelse(
+      grepl("Food", referral_reasons), 1, 0
+    ),
+    had_rental_assistance_referral = ifelse(
+      grepl("Rent/Eviction Support", referral_reasons), 1, 0
+    ),
+    had_financial_assistance_referral = ifelse(
+      grepl("Financial Assistance", referral_reasons), 1, 0
+    ),
+    had_housing_referral = ifelse(
+      grepl("Housing", referral_reasons), 1, 0 
+    ),
+    had_household_items_referral = ifelse(
+      grepl("Household items", referral_reasons), 1, 0
+    ),
+    had_cleaning_supplies_referral = ifelse(
+      grepl("Cleaning Supplies", referral_reasons), 1, 0 
+    ),
+    had_insurance_referral = ifelse(
+      grepl("Health Insurance Enrollment/Navigation", referral_reasons), 1, 0
+    ),
+    had_drinking_water_referral = ifelse(
+      grepl("Drinking Water Supplies", referral_reasons), 1, 0
+    ),
+    had_overcrowded_referral = ifelse(
+      grepl("Overcrowded Housing", referral_reasons), 1, 0
+    ),
+    had_unemployment_referral = ifelse(
+      grepl("Unemployment", referral_reasons), 1, 0
+    ),
+    had_health_supplies_referral = ifelse(
+      grepl("Health Supplies", referral_reasons), 1, 0
+    ),
+    had_baby_supplies_referral = ifelse(
+      grepl("Baby Supplies", referral_reasons), 1, 0
+    ),
+    had_workplace_referral = ifelse(
+      grepl("Workplace Issues", referral_reasons), 1, 0
+    ),
+    had_chronic_conditions_referral = ifelse(
+      grepl("Chronic conditions", referral_reasons), 1, 0
+    ),
+    had_iq_kit_referral = ifelse(
+      grepl("Isolation/Quarantine Kits", referral_reasons), 1, 0
+    ),
+    had_adult_elder_care_referral = ifelse(
+      grepl("Adult/Elder Care", referral_reasons), 1, 0
+    ),
+    had_lang_barrier_referral = ifelse(
+      grepl("Cultural/Language Barriers", referral_reasons), 1, 0
+    ),
+    had_child_care_referral = ifelse(
+      grepl("Child Care", referral_reasons), 1, 0
+    ),
+    had_pharmacy_referral = ifelse(
+      grepl("Pharmacy", referral_reasons), 1, 0
+    ),
+    had_unsafe_referral = ifelse(
+      grepl("Unsafe living situation", referral_reasons), 1, 0
+    ),
+    had_shelter_referral = ifelse(
+      grepl("Shelter Placement", referral_reasons), 1, 0
+    ),
+    had_mental_referral = ifelse(
+      grepl("Mental Health Crises", referral_reasons), 1, 0
+    ),
+    had_pet_referral = ifelse(
+      grepl("Pet care", referral_reasons), 1, 0
+    ),
+    had_social_referral = ifelse(
+      grepl("Connect with social networks", referral_reasons), 1, 0
+    ),
+    had_legal_referral = ifelse(
+      grepl("Legal Support", referral_reasons), 1, 0
+    ),
+    had_snap_referral = ifelse(
+      grepl("SNAP/CalFresh", referral_reasons), 1, 0
+    ),
+    had_transportation_referral = ifelse(
+      grepl("Transportation", referral_reasons), 1, 0
+    ),
+    had_mobility_referral = ifelse(
+      grepl("Mobility", referral_reasons), 1, 0
+    ),
+    had_immigration_support_referral = ifelse(
+      grepl("Immigration Support", referral_reasons), 1, 0
+    ),
+    had_immigration_status_referral = ifelse(
+      grepl("Immigration Status", referral_reasons), 1, 0
+    ),
+    had_medical_equipment_referral = ifelse(
+      grepl("Medical Equipment", referral_reasons), 1, 0
+    ),
+    had_substance_referral = ifelse(
+      grepl("Substance use/addiction support", referral_reasons), 1, 0
+    ),
+    got_rental_assistance = ifelse(
+      as.numeric(Record.Number) %in% records_with_rental_assistance,
+      1,
+      0
+    ),
+    got_hotel_placement = ifelse(
+      as.numeric(Record.Number) %in% records_with_hotel_placement,
+      1,
+      0
+    ),
+    Record.Number = as.numeric(Record.Number)
+  ) %>% 
+  left_join(p_card_tracker) %>%
+  mutate(
+    got_grocery_assistance = ifelse(
+      grepl(
+        "FOOD|GOCERIES|GORCERIES|GRCOERIES|GROCEIRES|GROCEREIES|GROCERIES|GROCERIIES|GROCERIS|GROCERY|GROCIERIES|GROGERIES|BREAKFAST|LUNCH|DINNER|MEAL|GROCEREIS",
+        resources
+      ),
+      1,
+      0
+    ),
+    got_cleaning_supplies = ifelse(
+      grepl(
+        "CLEAN|HYGIENE|HYGENE|GLOVE|FACE|LAUNDRY|SOAP|PPE|WIPE|TOILET|TOWEL|DETERGENT",
+        resources
+      ),
+      1,
+      0
+    ),
+    got_baby_supplies = ifelse(
+      grepl(
+        "DIAPER|DAIPER|BABY|FORMULA|WIPE",
+        resources
+      ),
+      1,
+      0
+    ),
+    got_takeup = ifelse(
+      got_hotel_placement == 1 |
+        got_rental_assistance == 1 |
+        got_grocery_assistance == 1 |
+        got_cleaning_supplies == 1,
+      1,
+      0
+    )
+  )
+```
+
+# Table 2
+
+```{r}
+balance_variables <-
+  c(
+    "male",
+    "female",
+    "unknown_other",
+    "hispanic",
+    "white",
+    "asian",
+    "black",
+    "not_reported",
+    "multirace_other",
+    "age",
+    "age_0_17",
+    "age_18_24",
+    "age_25_44",
+    "age_45_64",
+    "age_65_plus"
+  )
+
+balance_df <- evaluation_data %>%
+  filter(
+    !is.na(Z),
+    !is.na(Person.Account..Birthdate..),
+  ) %>%
+  mutate(
+    male = ifelse(Person.Account..Gender.. == "Male", 1, 0),
+    female = ifelse(Person.Account..Gender.. == "Female", 1, 0),
+    unknown_other = ifelse(
+      Person.Account..Gender.. != "Male" & Person.Account..Gender.. != "Female", 1, 0
+    ),
+    hispanic = ifelse(Person..Hispanic.. == "Hispanic or Latino", 1, 0),
+    white = ifelse(Race.and.Ethnicity == "White", 1, 0),
+    asian = ifelse(Race.and.Ethnicity == "Asian", 1, 0),
+    black = ifelse(Race.and.Ethnicity == "Black or African American", 1, 0),
+    not_reported = ifelse(Race.and.Ethnicity == "Unknown", 1, 0),
+    multirace_other = ifelse(Race.and.Ethnicity == "Multi-race" | Race.and.Ethnicity == "Other", 1, 0),
+    age = age_calc(
+      dob = as.Date(Person.Account..Birthdate.., format = "%m/%d/%Y"),
+      enddate = as.Date("2021-05-23"),
+      units = "years"
+    ),
+    age_0_17 = ifelse(age < 18, 1, 0),
+    age_18_24 = ifelse(age >= 18 & age < 25, 1, 0),
+    age_25_44 = ifelse(age >= 25 & age < 45, 1, 0),
+    age_45_64 = ifelse(age >= 45 & age < 65, 1, 0),
+    age_65_plus = ifelse(age >= 65, 1, 0)
+  ) %>%
+  filter_at(all_of(balance_variables), all_vars(!is.na(.))) %>%
+  select(Week_Of, Z, all_of(balance_variables))
+
+t_tests <- tibble(mean_control=c(), mean_treatment=c(), p.value=c(), ci_lower = c(), ci_upper = c())
+for (covariate in balance_variables) {
+  tt <- t.test(balance_df[[covariate]][balance_df$Z==0], balance_df[[covariate]][balance_df$Z==1], var.equal=F)
+    
+  t_tests <- rbind(t_tests, tibble(mean_control=c(tt$estimate[1]), mean_treatment=c(tt$estimate[2]), p.value=c(tt$p.value), ci_lower = c(tt$conf.int[1]), ci_upper = c(tt$conf.int[2])))
+}
+
+bal_tab <- matrix(NaN, nrow = length(balance_variables), ncol = 5)
+colnames(bal_tab) <- c("mean (Z=0)", "mean (Z=1)", "ci_lower", "ci_upper", "p-val")
+rownames(bal_tab) <- balance_variables
+
+for (i in seq_along(balance_variables)) {
+  bal_tab[i,] <- c(t_tests[i,]$mean_control, t_tests[i,]$mean_treatment, t_tests[i,]$ci_lower, t_tests[i,]$ci_upper, t_tests[i,]$p.value)
+}
+
+bal_tab %>% round(digits = 3)
+```
+
+# Table 3
+
+```{r}
+outcome_variables <- c(
+  "had_referral",
+  "had_financial_assistance_referral",
+  "had_rental_assistance_referral",
+  "had_food_referral",
+  "had_cleaning_supplies_referral",
+  "had_housing_referral",
+  "got_takeup",
+  "got_rental_assistance",
+  "got_grocery_assistance",
+  "got_cleaning_supplies",
+  "got_hotel_placement"
+)
+
+df_cace <- evaluation_data %>%
+  filter(
+    !is.na(Z),
+    Zip %in% JDOC_ZIP
+  ) %>% 
+  filter(
+    !is.na(Person.Account..Birthdate..),
+  ) %>% 
+  mutate(
+    male = ifelse(Person.Account..Gender.. == "Male", 1, 0),
+    female = ifelse(Person.Account..Gender.. == "Female", 1, 0),
+    unknown_other = ifelse(
+      Person.Account..Gender.. != "Male" & Person.Account..Gender.. != "Female", 1, 0
+    ),
+    hispanic = ifelse(Person..Hispanic.. == "Hispanic or Latino", 1, 0),
+    white = ifelse(Race.and.Ethnicity == "White", 1, 0),
+    asian = ifelse(Race.and.Ethnicity == "Asian", 1, 0),
+    black = ifelse(Race.and.Ethnicity == "Black or African American", 1, 0),
+    not_reported = ifelse(Race.and.Ethnicity == "Unknown", 1, 0),
+    multirace_other = ifelse(Race.and.Ethnicity == "Multi-race" | Race.and.Ethnicity == "Other", 1, 0),
+    age = age_calc(
+      dob = as.Date(Person.Account..Birthdate.., format = "%m/%d/%Y"),
+      enddate = as.Date("2021-05-23"),
+      units = "years"
+    ),
+    age_0_17 = ifelse(age < 18, 1, 0),
+    age_18_24 = ifelse(age >= 18 & age < 25, 1, 0),
+    age_25_44 = ifelse(age >= 25 & age < 45, 1, 0),
+    age_45_64 = ifelse(age >= 45 & age < 65, 1, 0),
+    age_65_plus = ifelse(age >= 65, 1, 0),
+    ZIP_Week = paste(Zip, Week_Of)
+  ) %>% 
+  filter_at(all_of(balance_variables), all_vars(!is.na(.)))
+```
+
+ITT
+
+```{r}
+# calculate treatment effect estimate for variables of interest
+get_treatment_effect <- function(df, variable_str){
+  
+  lm_fit <- lm(
+    as.formula(paste0(variable_str, "~ Z + factor(Week_Of)")),
+    data = df
+  )
+  
+  mod <- coeftest(lm_fit, vcovCR(lm_fit, cluster = df$ZIP_Week, type = "CR2"))
+  
+  ate_hat = mod[2,1]
+  se_hat = mod[2,2]
+  p_val = mod[2,4]
+  
+  c <- 1.96
+  ci_up <- ate_hat + c * se_hat
+  ci_lo <- ate_hat - c * se_hat
+  
+  return(
+    tibble(
+      ate_hat = c(ate_hat),
+      se_hat = c(se_hat),
+      p_val = c(p_val),
+      ci_lo = c(ci_lo),
+      ci_up = c(ci_up)
+    )
+  )
+  
+}
+
+as_randomized_res <- NULL
+for (variable in outcome_variables) {
+  as_randomized_res <- rbind(
+    as_randomized_res,
+    get_treatment_effect(
+      df_cace,
+      variable
+    )
+  )
+}
+
+# create balance table template
+res_tab <- matrix(NaN, nrow = length(outcome_variables), ncol = 5)
+colnames(res_tab) <- c("effect", "se", "p_val", "ci_lo", "ci_up")
+rownames(res_tab) <- outcome_variables
+
+# fill in results
+for (i in seq_along(outcome_variables)) {
+    res_tab[i,] <- c(as_randomized_res[i,]$mu_0, as_randomized_res[i,]$mu_1, as_randomized_res[i,]$ate_hat, as_randomized_res[i,]$se_hat, as_randomized_res[i,]$p_val, as_randomized_res[i,]$ci_lo, as_randomized_res[i,]$ci_up)
+}
+
+# formatting
+res_tab %>% round(digits = 4) %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  arrange(desc(effect)) %>% 
+  transmute(
+    rowname,
+    effect = effect *100,
+    se = se*100,
+    ci = paste0("[",ci_lo*100,", ",ci_up*100,"]"),
+    p_val = round(p_val,6)
+  )
+```
+
+IV
+
+```{r}
+# first stage results
+# lm_robust uses same robust standard error estimator as iv_robust (HC2)
+# see: https://www.rdocumentation.org/packages/estimatr/versions/0.30.2/topics/iv_robust
+mod_fs <- lm_robust(D ~ Z, fixed_effects = ~ Week_Of, clusters = Week_Of, data = df_cace)
+summary(mod_fs)
+
+# test for weak instrument
+# basic rule of thumb (except in small samples) is F-statistic > 10 for a 'relevant' instrument (i.e. Z has a non-zero "effect" on D)
+mod_1 <- lm(D ~ Z + factor(Week_Of), data = df_cace)
+mod_0 <- lm(D ~ factor(Week_Of), data = df_cace)
+waldtest(mod_1, mod_0, vcov = vcovCR(mod_1, cluster = df_cace$ZIP_Week, type = "CR2"))
+
+cace_res <- NULL
+
+for (variable in outcome_variables) {
+  # control for imbalanced variables
+  mod <- iv_robust(
+    as.formula(paste0(variable, " ~ D + ", str_c(balance_variables, collapse = " + "), " | Z + ", str_c(balance_variables, collapse = " + "))),
+    data = df_cace,
+    clusters = ZIP_Week,
+    fixed_effects = ~ Week_Of
+  )
+  ate_hat <- mod$coefficients[1]
+  se_hat <- mod$std.error[1]
+  p_val <- mod$p.value[1]
+  ci_low <- mod$conf.low[1]
+  ci_high = mod$conf.high[1]
+  
+  cace_res <- rbind(
+    cace_res,
+    tibble(
+      effect=c(ate_hat),
+      se=c(se_hat),
+      p_val = c(p_val),
+      ci_low = c(ci_low),
+      ci_high = c(ci_high)
+    )
+  )
+}
+
+# create balance table template
+res_tab <- matrix(NaN, nrow = length(outcome_variables), ncol = 5)
+colnames(res_tab) <- c("effect", "se", "p_val", "ci (low)", "ci (high)")
+rownames(res_tab) <- outcome_variables
+
+# fill in results
+for (i in seq_along(outcome_variables)) {
+    res_tab[i,] <- c(
+      cace_res[i,]$effect,
+      cace_res[i,]$se,
+      cace_res[i,]$p_val,
+      cace_res[i,]$ci_low,
+      cace_res[i,]$ci_high
+    )
+}
+
+# formatting
+res_tab %>% 
+  round(digits = 4) %>% 
+  as.data.frame() %>% 
+  arrange(desc(effect)) %>% 
+  transmute(
+    effect = effect *100,
+    se = se*100,
+    ci = paste0("[",`ci (low)`*100,", ",`ci (high)`*100,"]"),
+    p_val = round(p_val,3)
+  )
+```
+
+# S1 Appendix Table 2
+
+```{r}
+high_touch_staff <- get_high_touch_staff() %>% toupper() # redacted
+non_tracer <- get_non_tracer_record_owner_values() %>% toupper() # redacted
+cict_desc <- read_csv("cict_combined.csv") %>% # redacted
+  distinct(Record.Number, .keep_all = T) %>%
+  mutate(
+    Opened.Date = as.Date(Opened.Date, format = "%m/%d/%Y"),
+    Record.Owner = toupper(Record.Owner)
+  ) %>%
+  filter(
+    Opened.Date >= "2021-01-06",
+    Opened.Date <= "2021-05-22",
+    !(Record.Owner %in% non_tracer)
+  ) %>%
+  mutate(
+    D = ifelse(Record.Owner %in% high_touch_staff, 1, 0),
+    Week_Of = as.Date(cut(Opened.Date, "week")),
+    Month_Of = as.Date(cut(Opened.Date, "month"))
+    # redacted name cleaning
+  )
+```
+
+```{r}
+tracers <- read_csv("CICT snapshot May 23 2021.csv") %>% # redacted
+  mutate_at(
+    c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"),
+    function(x) (ifelse(x == "0 checked out of 1", 0, 1))
+  ) %>%
+  mutate(
+    n_working_days = Sunday + Monday + Tuesday + Wednesday + Thursday + Friday + Saturday,
+    `Full Name` = str_squish(toupper(`Full Name`))
+    # redacted name cleaning
+  ) %>%
+  filter(
+    n_working_days == 5,
+    Relationship != "State",
+    Status == "Active"
+  )
+```
+
+```{r}
+cases_active_tracers <- cict %>%
+  filter(Record.Owner %in% tracers$`Full Name`)
+
+cases_active_tracers %>%
+  group_by(D) %>%
+  summarize(
+    n_cases = n()
+  )
+
+active_ht_tracers <- tracers %>%
+  filter(
+    Role == "High-Touch CICT",
+    `Full Name` %in% cases_active_tracers$Record.Owner
+  )
+
+active_non_ht_tracers <- tracers %>%
+  filter(
+    Role != "High-Touch CICT",
+    `Full Name` %in% cases_active_tracers$Record.Owner
+  )
+```
+
+```{r}
+joint_pval = function(df) {
+  
+  attr_ht = df %>% filter(D == 1)
+  attr_standard = df %>% filter(D == 0)
+  
+  m = matrix(c(attr_ht$n_attr, attr_standard$n_attr), ncol=2)
+  print(m)
+  
+  print(chisq.test(m))
+  
+}
+```
+
+Language
+
+```{r}
+language_df <- cases_active_tracers %>%
+    mutate(
+      Person.Account..Language.. = ifelse(
+        Person.Account..Language.. %in% c(NA, "Unknown", "Not specified", "Other", "Refused"),
+        "Unknown/other",
+        Person.Account..Language..
+      ),
+      Person.Account..Language.. = ifelse(
+        Person.Account..Language.. %in% c("English", "Unknown/other"),
+        Person.Account..Language..,
+        "Non-English"
+      )
+    ) %>%
+    group_by(D) %>%
+    add_tally(name = 'N') %>%
+    ungroup() %>%
+    group_by(D, Person.Account..Language..) %>%
+    add_tally(name = 'n_attr') %>%
+    select(D, Person.Account..Language.., N, n_attr) %>%
+    mutate(
+        percent = n_attr/N
+    ) %>%
+    arrange(D, Person.Account..Language..) %>%
+    distinct() %>%
+    mutate(
+        lower_ci = binom.exact(n_attr, N, conf.level = .95)$lower,
+        upper_ci = binom.exact(n_attr, N, conf.level = .95)$upper
+    )
+
+language_df
+
+joint_pval(language_df)
+```
+
+Cases by interview outcome
+
+```{r}
+interview_df <- cases_active_tracers %>%
+    mutate(
+      Initial.Interview.Outcome = ifelse(
+        Initial.Interview.Outcome %in% c(NA, "No attempt made"), "No attempt made/missing", Initial.Interview.Outcome
+      )
+    ) %>%
+    group_by(D) %>%
+    add_tally(name = 'N') %>%
+    ungroup() %>%
+    group_by(D, Initial.Interview.Outcome) %>%
+    add_tally(name = 'n_attr') %>%
+    select(D, Initial.Interview.Outcome, N, n_attr) %>%
+    mutate(
+        percent = n_attr/N
+    ) %>%
+    arrange(D, Initial.Interview.Outcome) %>%
+    distinct() %>%
+    mutate(
+        lower_ci = binom.exact(n_attr, N, conf.level = .95)$lower,
+        upper_ci = binom.exact(n_attr, N, conf.level = .95)$upper
+    )
+
+interview_df
+
+joint_pval(interview_df)
+```
+
+Calls
+
+```{r}
+calls_old <- readRDS("calls_old.csv") %>% # redacted
+  filter(Contact != "-") %>%
+  mutate(
+    Contact = toupper(Contact),
+    Duration = duration(toupper(Duration)),
+    Date = as.Date(Date, format = "%m/%d/%Y")
+  ) %>%
+  group_by(Contact) %>%
+  summarize(
+    n_attempts = n(),
+    total_duration_seconds = sum(Duration, na.rm = T),
+    callers = list(unique(`Account Owner`))
+  )
+
+calls <- read_csv("calls.csv") # redacted
+call_attempts_per_record <- calls %>%
+  filter(Record != "-") %>%
+  mutate(Duration = as.duration(toupper(Duration))) %>%
+  group_by(Record) %>%
+  summarize(
+    n_attempts = n(),
+    total_duration_seconds = sum(Duration, na.rm = T)
+  )
+```
+
+```{r}
+calls_df <- cases_active_tracers %>%
+  left_join(
+    call_attempts_per_record %>% rename(Record.Number = Record),
+    by = "Record.Number"
+  )
+
+joined_calls <- calls_df %>%
+  filter(!is.na(n_attempts))
+
+unjoined_calls <- calls_df %>%
+  filter(is.na(n_attempts)) %>%
+  select(-n_attempts, -total_duration_seconds) %>%
+  mutate(
+    Person.Account..First.Name.. = toupper(Person.Account..First.Name..),
+    Person.Account..Last.Name.. = iconv(Person.Account..Last.Name..,"WINDOWS-1252","UTF-8"),
+    Person.Account..Last.Name.. = toupper(Person.Account..Last.Name..),
+    Contact = paste(Person.Account..First.Name.., Person.Account..Last.Name..)
+  ) %>%
+  left_join(
+    calls_old,
+    by = "Contact"
+  )
+
+calls_df <- bind_rows(joined_calls, unjoined_calls)
+```
+
+```{r}
+t.test(calls_df[["n_attempts"]][calls_df$D==1], calls_df[["n_attempts"]][calls_df$D==0], var.equal=F)
+
+t.test(calls_df[["total_duration_seconds"]][calls_df$D==1], calls_df[["total_duration_seconds"]][calls_df$D==0], var.equal=F)
+```
+
+Contacts
+
+```{r}
+cict_cases <- read_csv("cict_all_032922_1501.csv") %>% # redacted
+  distinct(Record.Number, .keep_all = T) %>%
+  filter(
+    Record.Type == "COVID-19 Case"
+  ) %>%
+  select(Record.Number, Household, Person.Account..Mailing.Street.., Apartment.Number.., Person.Account..Mailing.Zip.Postal.Code..)
+
+cict_contacts <- read_csv("cict_all_032922_1501.csv") %>%
+  distinct(Record.Number, .keep_all = T) %>%
+  filter(
+    Record.Type == "COVID-19 Contact",
+    Parent.Record.Number != 0
+  ) %>%
+  select(Parent.Record.Number, Household, Person.Account..Mailing.Street.., Apartment.Number.., Person.Account..Mailing.Zip.Postal.Code..)
+```
+
+```{r}
+joined_contacts <- cict_contacts %>%
+  left_join(
+    cict_cases %>% rename(Parent.Record.Number = Record.Number),
+    by = "Parent.Record.Number"
+  ) %>%
+  mutate(
+    matched_household = Household.x == Household.y,
+    matched_household = ifelse(is.na(matched_household), F, matched_household)
+  )
+
+hh_contacts <- joined_contacts %>%
+  filter(matched_household) %>%
+  group_by(Parent.Record.Number) %>%
+  count()
+
+non_hh_contacts <- joined_contacts %>%
+  filter(!matched_household) %>%
+  group_by(Parent.Record.Number) %>%
+  count()
+```
+
+```{r}
+contacts_df <- cases_active_tracers %>%
+  left_join(
+    non_hh_contacts %>%
+      rename(
+        Record.Number = Parent.Record.Number,
+        n_contacts = n
+      )
+  ) %>%
+  mutate(
+    n_contacts = ifelse(is.na(n_contacts), 0, n_contacts),
+    D = as.factor(D)
+  )
+
+t.test(contacts_df[["n_contacts"]][contacts_df$D==0], contacts_df[["n_contacts"]][contacts_df$D==1], var.equal=F)
+```
+
+# S2 Appendix Figure 1
+
+```{r}
+s <- read_csv("random sample - Sheet1 (1).csv") %>% # redacted
+  mutate(
+    `Initial Interview Length` = as.duration(toupper(`Initial Interview Length`)),
+    total_min = `Total Duration (s)` / 60,
+    non_interview_duration = `Total Duration (s)` - `Initial Interview Length`
+  ) %>%
+  select(-`X8`, -`1st call`, -`2nd call`)
+
+ggplot(
+    s %>% mutate(tracer = ifelse(`High-Touch` == 1, "High-touch", "Standard")),
+    aes(x=`# Call Attempts`, color=tracer)
+  ) +
+    geom_density() +
+    labs(
+      x = "Number of call attempts",
+      y = "Density",
+      color = "Tracer"
+    ) +
+  theme_bw()
+```
+
+# S2 Appendix Table 1
+
+```{r}
+df_baseline <- cict %>%
+  filter(
+    Week_Of < "2021-02-15"
+  ) %>%
+  left_join(all_referrals) %>%
+  left_join(resource_referrals) %>%
+  left_join(clinical_referrals) %>%
+  mutate(
+    had_referral = ifelse(!grepl("NULL", referral_ids), 1, 0),
+    had_financial_assistance_referral = ifelse(
+      grepl("Financial Assistance", referral_reasons), 1, 0
+    ),
+    had_food_referral = ifelse(
+      grepl("Food", referral_reasons), 1, 0
+    ),
+    had_cleaning_supplies_referral = ifelse(
+      grepl("Cleaning Supplies", referral_reasons), 1, 0 # Health Supplies; Isolation/Quarantine Kits
+    ),
+    had_rental_assistance_referral = ifelse(
+      grepl("Rent/Eviction Support", referral_reasons), 1, 0
+    ),
+    had_housing_referral = ifelse(
+      grepl("Housing", referral_reasons), 1, 0 # Overcrowded Housing; Unsafe living situation; Shelter Placement
+    ),
+  ) %>%
+  mutate(Record.Number = as.numeric(Record.Number)) %>%
+  mutate(
+    got_hotel_placement = ifelse(
+      Record.Number %in% records_with_hotel_placement,
+      1,
+      0
+    ),
+    got_rental_assistance = ifelse(
+      Record.Number %in% records_with_rental_assistance,
+      1,
+      0
+    )
+  ) %>%
+  left_join(p_card_tracker) %>%
+  mutate(
+    got_grocery_assistance = ifelse(
+      grepl(
+        "FOOD|GOCERIES|GORCERIES|GRCOERIES|GROCEIRES|GROCEREIES|GROCERIES|GROCERIIES|GROCERIS|GROCERY|GROCIERIES|GROGERIES|BREAKFAST|LUNCH|DINNER|MEAL|GROCEREIS",
+        resources
+      ),
+      1,
+      0
+    ),
+    got_cleaning_supplies = ifelse(
+      grepl(
+        "CLEAN|HYGIENE|HYGENE|GLOVE|FACE|LAUNDRY|SOAP|PPE|WIPE|DIAPER|TOILET|TOWEL|DETERGENT",
+        resources
+      ),
+      1,
+      0
+    )
+  ) %>%
+  mutate(Opened.Date = as.Date(Opened.Date, format = "%m/%d/%Y"))
+```
+
+```{r}
+before_pilot <- df_baseline %>%
+  filter(Opened.Date >= as.Date("2020-11-09"), Opened.Date < as.Date("2021-02-15"))
+
+# two-sample t-tests for each variable
+t_tests <- tibble(mean_before=c(), mean_during=c(), ci_lower = c(), ci_upper = c(), p.value=c(), )
+for (variable in outcome_variables) {
+  tt <- t.test(evaluation_data[[variable]], before_pilot[[variable]], var.equal=F)
+  t_tests <- rbind(t_tests, tibble(mean_before=c(tt$estimate[2]), mean_during=c(tt$estimate[1]), p.value=c(tt$p.value), ci_lower = c(tt$conf.int[1]), ci_upper = c(tt$conf.int[2])))
+}
+
+# create table template
+diff_tab <- matrix(NaN, nrow = length(outcome_variables), ncol = 5)
+colnames(diff_tab) <- c("mean (before pilot)", "mean (during pilot)", "ci_lower", "ci_upper", "p-val")
+rownames(diff_tab) <- outcome_variables
+# fill in results from t-tests
+for (i in seq_along(outcome_variables)) {
+  diff_tab[i,] <- c(t_tests[i,]$mean_before, t_tests[i,]$mean_during, t_tests[i,]$ci_lower, t_tests[i,]$ci_upper, t_tests[i,]$p.value)
+}
+# formatting
+diff_tab %>% round(digits = 2)
+
+# two-sample t-tests for each variable
+t_tests <- tibble(mean_before=c(), mean_during=c(), ci_lower = c(), ci_upper = c(), p.value=c(), )
+for (variable in outcome_variables) {
+  tt <- t.test((evaluation_data %>% filter(Zip %in% c("95116", "95122", "95127")))[[variable]], (before_pilot %>% filter(Zip %in% c("95116", "95122", "95127")))[[variable]], var.equal=F)
+  t_tests <- rbind(t_tests, tibble(mean_before=c(tt$estimate[2]), mean_during=c(tt$estimate[1]), p.value=c(tt$p.value), ci_lower = c(tt$conf.int[1]), ci_upper = c(tt$conf.int[2])))
+}
+
+# create table template
+diff_tab <- matrix(NaN, nrow = length(outcome_variables), ncol = 5)
+colnames(diff_tab) <- c("mean (before pilot)", "mean (during pilot)", "ci_lower", "ci_upper", "p-val")
+rownames(diff_tab) <- outcome_variables
+# fill in results from t-tests
+for (i in seq_along(outcome_variables)) {
+  diff_tab[i,] <- c(t_tests[i,]$mean_before, t_tests[i,]$mean_during, t_tests[i,]$ci_lower, t_tests[i,]$ci_upper, t_tests[i,]$p.value)
+}
+# formatting
+diff_tab %>% round(digits = 2)
+
+print("non-D2D zips")
+
+# two-sample t-tests for each variable
+t_tests <- tibble(mean_before=c(), mean_during=c(), p.value=c())
+for (variable in outcome_variables) {
+  tt <- t.test((before_pilot %>% filter(!(Zip %in% c("95116", "95122", "95127"))))[[variable]], (evaluation_data %>% filter(!(Zip %in% c("95116", "95122", "95127"))))[[variable]], var.equal=F)
+  t_tests <- rbind(t_tests, tibble(mean_before=c(tt$estimate[1]), mean_during=c(tt$estimate[2]), p.value=c(tt$p.value)))
+}
+
+# create table template
+diff_tab <- matrix(NaN, nrow = length(outcome_variables), ncol = 3)
+colnames(diff_tab) <- c("mean (before pilot)", "mean (during pilot)", "p-val")
+rownames(diff_tab) <- outcome_variables
+# fill in results from t-tests
+for (i in seq_along(outcome_variables)) {
+  diff_tab[i,] <- c(t_tests[i,]$mean_before, t_tests[i,]$mean_during, t_tests[i,]$p.value)
+}
+# formatting
+diff_tab %>% round(digits = 2)
+```
+
+# S2 Appendix Figure 1
+
+```{r}
+TREATMENT_START_DATE <- as.Date("2021-01-06")
+PILOT_START_DATE <- as.Date("2021-02-15")
+
+PRIORITY_ZIPS <- c(
+  "95116",
+  "95122",
+  "95127",
+  "95111",
+  "95112",
+  "95121",
+  "95148",
+  "95020",
+  "95037",
+  "95123",
+  "95136",
+  "95128"
+)
+
+# 10 day increments to deal with cases the week of 2021-01-04
+periods <- c(
+  as.Date(TREATMENT_START_DATE)
+)
+for (i in seq(1:25)) {
+  periods <- append(periods, TREATMENT_START_DATE %m+% period(paste0(i * 10, "days")))
+  periods <- append(periods, TREATMENT_START_DATE %m-% period(paste0(i * 10, "days")))
+}
+periods <- sort(periods)
+
+df_eval <- read_csv("cict_combined.csv") %>%
+  distinct(Record.Number, .keep_all = T) %>%
+  select(
+    Record.Number,
+    Opened.Date,
+    CalREDIE.Incident.ID..,
+    Record.Owner,
+    Person.Account..First.Name..,
+    Person.Account..Last.Name..,
+    Person.Account..Birthdate..,
+    Person.Account..Mailing.Street..,
+    Apartment.Number..,
+    Person.Account..Mailing.Zip.Postal.Code..,
+    Person.Account..Gender..,
+    Person..Hispanic..,
+    Race.and.Ethnicity,
+    Initial.Interview.Outcome,
+    If.yes..total.number.of.close.contacts.
+  ) %>%
+  mutate(
+    Opened.Date = as.Date(Opened.Date, format = "%m/%d/%Y"),
+    Week_Of = as.Date(cut(Opened.Date, "week")),
+    Person.Account..Mailing.Zip.Postal.Code.. = as.character(
+      Person.Account..Mailing.Zip.Postal.Code..
+    ),
+  ) %>%
+  rename(Zip = Person.Account..Mailing.Zip.Postal.Code..) %>%
+  left_join(assignments, by = c("Week_Of", "Zip")) %>%
+  # Dummy variables for outcomes analysis
+  mutate(
+    D = ifelse(Record.Owner %in% high_touch_staff, 1, 0),
+    completed_interview = !is.na(Initial.Interview.Outcome) & Initial.Interview.Outcome == "Completed",
+    refused_interview = !is.na(Initial.Interview.Outcome) & Initial.Interview.Outcome == "Refused to interview",
+    num_close_contacts = ifelse(If.yes..total.number.of.close.contacts. == 999, NA, If.yes..total.number.of.close.contacts.)
+  ) %>%
+  left_join(all_referrals) %>%
+  left_join(resource_referrals) %>%
+  left_join(clinical_referrals) %>%
+  mutate(
+    had_referral = ifelse(!grepl("NULL", referral_ids), 1, 0),
+    had_resource_referral = ifelse(!grepl("NULL", resource_referral_ids), 1, 0),
+    had_clinical_referral = ifelse(!grepl("NULL", clinical_referral_ids), 1, 0),
+    had_financial_assistance_referral = ifelse(
+      grepl("Financial Assistance", referral_reasons), 1, 0
+    ),
+    had_food_referral = ifelse(
+      grepl("Food", referral_reasons), 1, 0
+    ),
+    had_cleaning_supplies_referral = ifelse(
+      grepl("Cleaning Supplies|Isolation/Quarantine Kits", referral_reasons), 1, 0 # Health Supplies; Isolation/Quarantine Kits
+    ),
+    had_rental_assistance_referral = ifelse(
+      grepl("Rent/Eviction Support", referral_reasons), 1, 0
+    ),
+    had_housing_referral = ifelse(
+      grepl("Housing", referral_reasons), 1, 0 # Overcrowded Housing; Unsafe living situation; Shelter Placement
+    ),
+    had_insurance_referral = ifelse(
+      grepl("Health Insurance Enrollment/Navigation", referral_reasons), 1, 0
+    ),
+    had_iq_service_referral = ifelse(
+      had_financial_assistance_referral == 1 |
+        had_rental_assistance_referral == 1 |
+        had_food_referral == 1 |
+        had_cleaning_supplies_referral == 1 |
+        had_housing_referral == 1,
+      1,
+      0
+    ),
+  ) %>%
+  mutate(Record.Number = as.numeric(Record.Number)) %>%
+  mutate(
+    got_hotel_placement = ifelse(
+      Record.Number %in% records_with_hotel_placement,
+      1,
+      0
+    ),
+    got_rental_assistance = ifelse(
+      Record.Number %in% records_with_rental_assistance,
+      1,
+      0
+    )
+  ) %>%
+  left_join(p_card_tracker) %>%
+  mutate(
+    got_grocery_assistance = ifelse(
+      grepl(
+        "FOOD|GOCERIES|GORCERIES|GRCOERIES|GROCEIRES|GROCEREIES|GROCERIES|GROCERIIES|GROCERIS|GROCERY|GROCIERIES|GROGERIES|BREAKFAST|LUNCH|DINNER|MEAL|GROCEREIS",
+        resources
+      ),
+      1,
+      0
+    ),
+    got_cleaning_supplies = ifelse(
+      grepl(
+        "CLEAN|HYGIENE|HYGENE|GLOVE|FACE|LAUNDRY|SOAP|PPE|WIPE|DIAPER|TOILET|TOWEL|DETERGENT",
+        resources
+      ),
+      1,
+      0
+    )
+  ) %>%
+  mutate(Opened.Date = as.Date(Opened.Date, format = "%m/%d/%Y")) %>% 
+  mutate(
+    got_takeup = ifelse(
+      got_hotel_placement == 1 |
+        got_rental_assistance == 1 |
+        got_grocery_assistance == 1 |
+        got_cleaning_supplies == 1,
+      1,
+      0
+    )
+  ) %>% 
+  filter(
+    Week_Of <= PILOT_START_DATE,
+    !is.na(Zip)
+  ) %>%
+  mutate(
+    time_unit = as.Date(cut(Opened.Date, periods)),
+    treatment_time = ifelse(Opened.Date >= TREATMENT_START_DATE, 1, 0),
+    treatment_zip = as.factor(
+      ifelse(
+        (Opened.Date < PILOT_START_DATE & Zip %in% PRIORITY_ZIPS) | (!is.na(always_assigned) & always_assigned),
+        1,
+        ifelse(
+          Opened.Date < PILOT_START_DATE & !(Zip %in% PRIORITY_ZIPS),
+          0,
+          ifelse(
+            Opened.Date >= PILOT_START_DATE & is.na(Type),
+            0,
+            NA
+          )
+        )
+      )
+    )
+  ) %>%
+  filter(!is.na(treatment_zip)) %>%
+  filter(time_unit >= as.Date("2020-11-07"))
+```
+
+```{r}
+variable <- "had_referral"
+
+df_eval_plot <- df_eval %>%
+  group_by(time_unit, treatment_zip) %>%
+  summarize(
+    `Case count` = n(),
+    outcome = mean(get(variable), na.rm = T),
+  ) %>%
+  mutate(
+    plot_time_unit = time_unit + 9
+  )
+
+print(
+  ggplot(df_eval_plot, aes(x = plot_time_unit, y = outcome, color = treatment_zip, group = treatment_zip)) +
+  geom_line() +
+  geom_point(aes(size = `Case count`), alpha = 0.75) +
+  geom_vline(xintercept = TREATMENT_START_DATE) +
+  labs(
+    x = "Date case opened",
+    y = get_label_from_variable(variable),
+    color = "Assigned Zip"
+  ) +
+  scale_color_manual(values = c("#00bfc4", "#f8766d")) +
+  theme_bw()
+)
+```
+
+# S2 Appendix Table 2
+
+```{r}
+# Exclude periods that are outside of the time period we have data for.
+periods <- periods[periods %in% df_eval$time_unit]
+
+did_res <- NULL
+
+for (variable in outcome_variables) {
+  grouped <- df_eval %>%
+    group_by(Zip, time_unit) %>%
+    summarize(
+      treatment_time = unique(treatment_time),
+      treatment_zip = unique(treatment_zip),
+      outcome = mean(get(variable), na.rm = T)
+    )
+  
+  panel <- pdata.frame(grouped, index = c("Zip", "time_unit"))
+  
+  did.reg <- plm(
+    outcome ~ treatment_time * treatment_zip, 
+    data = panel,
+    model = "within"
+  )
+  
+  mod <- coeftest(did.reg, vcov=function(x) vcovDC(x, type="HC1"))
+  ate_hat <- mod[2,1]
+  se_hat <- mod[2,2]
+  p_val <- mod[2,4]
+  ci_lower <- confint(mod)[2,1]
+  ci_upper <- confint(mod)[2,2]
+  
+  did_res <- rbind(
+    did_res,
+    tibble(
+      effect=c(ate_hat),
+      se=c(se_hat),
+      p_val = c(p_val),
+      ci_lower = c(ci_lower),
+      ci_upper = c(ci_upper)
+    )
+  )
+}
+
+# create balance table template
+res_tab <- matrix(NaN, nrow = length(outcome_variables), ncol = 5)
+colnames(res_tab) <- c("effect", "se", "p_val", "ci_lower", "ci_upper")
+rownames(res_tab) <- outcome_variables
+
+# fill in results
+for (i in seq_along(outcome_variables)) {
+    res_tab[i,] <- c(
+      did_res[i,]$effect,
+      did_res[i,]$se,
+      did_res[i,]$p_val,
+      did_res[i,]$ci_lower,
+      did_res[i,]$ci_upper
+    )
+}
+
+# formatting
+res_tab %>% round(digits = 4)
+```
+
+# S2 Appendix Table 3
+
+```{r}
+periods <- c(
+  as.Date("2020-05-21")
+)
+for (i in seq(1:27)) {
+  periods <- append(periods, as.Date("2020-05-21") %m+% period(paste0(i * 10, "days")))
+}
+periods <- sort(periods)
+```
+
+```{r}
+placebo_df_eval <- read_csv("cict_combined.csv") %>% # redacted
+  distinct(Record.Number, .keep_all = T) %>%
+  select(
+    Record.Number,
+    Opened.Date,
+    CalREDIE.Incident.ID..,
+    Record.Owner,
+    Person.Account..First.Name..,
+    Person.Account..Last.Name..,
+    Person.Account..Birthdate..,
+    Person.Account..Mailing.Street..,
+    Apartment.Number..,
+    Person.Account..Mailing.Zip.Postal.Code..,
+    Person.Account..Gender..,
+    Person..Hispanic..,
+    Race.and.Ethnicity,
+    Initial.Interview.Outcome,
+    If.yes..total.number.of.close.contacts.
+  ) %>%
+  mutate(
+    Opened.Date = as.Date(Opened.Date, format = "%m/%d/%Y"),
+    Week_Of = as.Date(cut(Opened.Date, "week")),
+    Person.Account..Mailing.Zip.Postal.Code.. = as.character(
+      Person.Account..Mailing.Zip.Postal.Code..
+    ),
+  ) %>%
+  rename(Zip = Person.Account..Mailing.Zip.Postal.Code..) %>%
+  left_join(assignments, by = c("Week_Of", "Zip")) %>%
+  mutate(
+    D = ifelse(Record.Owner %in% high_touch_staff, 1, 0),
+    completed_interview = !is.na(Initial.Interview.Outcome) & Initial.Interview.Outcome == "Completed",
+    refused_interview = !is.na(Initial.Interview.Outcome) & Initial.Interview.Outcome == "Refused to interview",
+    num_close_contacts = ifelse(If.yes..total.number.of.close.contacts. == 999, NA, If.yes..total.number.of.close.contacts.)
+  ) %>%
+  left_join(all_referrals) %>%
+  left_join(resource_referrals) %>%
+  left_join(clinical_referrals) %>%
+  mutate(
+    had_referral = ifelse(!grepl("NULL", referral_ids), 1, 0),
+    had_resource_referral = ifelse(!grepl("NULL", resource_referral_ids), 1, 0),
+    had_clinical_referral = ifelse(!grepl("NULL", clinical_referral_ids), 1, 0),
+    had_financial_assistance_referral = ifelse(
+      grepl("Financial Assistance", referral_reasons), 1, 0
+    ),
+    had_food_referral = ifelse(
+      grepl("Food", referral_reasons), 1, 0
+    ),
+    had_cleaning_supplies_referral = ifelse(
+      grepl("Cleaning Supplies|Isolation/Quarantine Kits", referral_reasons), 1, 0 # Health Supplies; Isolation/Quarantine Kits
+    ),
+    had_rental_assistance_referral = ifelse(
+      grepl("Rent/Eviction Support", referral_reasons), 1, 0
+    ),
+    had_housing_referral = ifelse(
+      grepl("Housing", referral_reasons), 1, 0 # Overcrowded Housing; Unsafe living situation; Shelter Placement
+    ),
+    had_insurance_referral = ifelse(
+      grepl("Health Insurance Enrollment/Navigation", referral_reasons), 1, 0
+    ),
+    had_iq_service_referral = ifelse(
+      had_financial_assistance_referral == 1 |
+        had_rental_assistance_referral == 1 |
+        had_food_referral == 1 |
+        had_cleaning_supplies_referral == 1 |
+        had_housing_referral == 1,
+      1,
+      0
+    ),
+  ) %>%
+  mutate(Record.Number = as.numeric(Record.Number)) %>%
+  mutate(
+    got_hotel_placement = ifelse(
+      Record.Number %in% records_with_hotel_placement,
+      1,
+      0
+    ),
+    got_rental_assistance = ifelse(
+      Record.Number %in% records_with_rental_assistance,
+      1,
+      0
+    )
+  ) %>%
+  left_join(p_card_tracker) %>%
+  mutate(
+    got_grocery_assistance = ifelse(
+      grepl(
+        "FOOD|GOCERIES|GORCERIES|GRCOERIES|GROCEIRES|GROCEREIES|GROCERIES|GROCERIIES|GROCERIS|GROCERY|GROCIERIES|GROGERIES|BREAKFAST|LUNCH|DINNER|MEAL|GROCEREIS",
+        resources
+      ),
+      1,
+      0
+    ),
+    got_cleaning_supplies = ifelse(
+      grepl(
+        "CLEAN|HYGIENE|HYGENE|GLOVE|FACE|LAUNDRY|SOAP|PPE|WIPE|DIAPER|TOILET|TOWEL|DETERGENT",
+        resources
+      ),
+      1,
+      0
+    )
+  ) %>%
+  mutate(Opened.Date = as.Date(Opened.Date, format = "%m/%d/%Y")) %>% 
+  mutate(
+    got_takeup = ifelse(
+      got_hotel_placement == 1 |
+        got_rental_assistance == 1 |
+        got_grocery_assistance == 1 |
+        got_cleaning_supplies == 1,
+      1,
+      0
+    )
+  ) %>% 
+  filter(
+    Week_Of <= PILOT_START_DATE,
+    !is.na(Zip)
+  ) %>%
+  mutate(
+    time_unit = as.Date(cut(Opened.Date, periods)),
+    treatment_time = ifelse(Opened.Date >= TREATMENT_START_DATE, 1, 0),
+    treatment_zip = as.factor(
+      ifelse(
+        (Opened.Date < PILOT_START_DATE & Zip %in% PRIORITY_ZIPS) | (!is.na(always_assigned) & always_assigned),
+        1,
+        ifelse(
+          Opened.Date < PILOT_START_DATE & !(Zip %in% PRIORITY_ZIPS),
+          0,
+          ifelse(
+            Opened.Date >= PILOT_START_DATE & is.na(Type),
+            0,
+            NA
+          )
+        )
+      )
+    )
+  ) %>%
+  filter(!is.na(treatment_zip))
+```
+
+```{r}
+# Pre-treatment
+moving_window_length <- 3
+pre_treatment_periods <- periods[periods < TREATMENT_START_DATE]
+pre_treatment_coefficients <- c()
+pre_treatment_ci_lower <- c()
+pre_treatment_ci_upper <- c()
+for (p in seq_along(as.list(pre_treatment_periods))) {
+
+  if (p > (length(pre_treatment_periods) - moving_window_length + 1)) {
+    break
+  }
+  
+  # Fit the DiD on the moving window. Each moving window consists of three dates:
+  # two placebo pre-treatment dates and one placebo post-treatment date.
+  placebo <- placebo_df_eval %>%
+    filter(
+      time_unit %in% pre_treatment_periods[seq(p, p + moving_window_length - 1)]
+    ) %>%
+    mutate(
+      treatment_time = ifelse(Opened.Date >= pre_treatment_periods[p + moving_window_length - 1], 1, 0)
+    )
+  
+  grouped <- placebo %>%
+    group_by(Zip, time_unit) %>%
+    summarize(
+      treatment_time = unique(treatment_time),
+      treatment_zip = unique(treatment_zip),
+      outcome = mean(get(VARIABLE), na.rm = T)
+    )
+  
+  panel <- pdata.frame(grouped, index = c("Zip", "time_unit"))
+  
+  did.reg <- plm(
+    outcome ~ treatment_time * treatment_zip, 
+    data = panel,
+    model = "within"
+  )
+  
+  ct <- coeftest(did.reg, vcov=function(x) vcovDC(x, type="HC1"))
+  print(ct)
+  coefficient <- ct[2,1]
+  ci <- confint(ct)[2,]
+  
+  pre_treatment_coefficients <- append(pre_treatment_coefficients, coefficient)
+  pre_treatment_ci_lower <- append(pre_treatment_ci_lower, ci[1])
+  pre_treatment_ci_upper <- append(pre_treatment_ci_upper, ci[2])
+}
+
+pre_treatment_plot <- tibble(
+  Time = pre_treatment_periods[1:length(pre_treatment_coefficients)],
+  Estimate = pre_treatment_coefficients,
+  CI_lower = pre_treatment_ci_lower,
+  CI_upper = pre_treatment_ci_upper
+)
+```
+
+```{r}
+# Post-treatment
+moving_window_length <- 3
+post_treatment_coefficients <- c()
+post_treatment_ci_lower <- c()
+post_treatment_ci_upper <- c()
+for (p in seq(length(pre_treatment_periods) - moving_window_length + 2, length(periods))) {
+
+  if (p > (length(periods) - moving_window_length + 1)) {
+    break
+  }
+
+  # Fit the DiD on the moving window. Each moving window consists of three dates:
+  # two placebo pre-treatment dates and one placebo post-treatment date.
+  placebo <- df_eval %>%
+    filter(
+      time_unit %in% periods[seq(p, p + moving_window_length - 1)]
+    ) %>%
+    mutate(
+      treatment_time = ifelse(Opened.Date >= periods[p + moving_window_length - 1], 1, 0)
+    )
+  
+  grouped <- placebo %>%
+    group_by(Zip, time_unit) %>%
+    summarize(
+      treatment_time = unique(treatment_time),
+      treatment_zip = unique(treatment_zip),
+      outcome = mean(get(VARIABLE), na.rm = T)
+    )
+  
+  panel <- pdata.frame(grouped, index = c("Zip", "time_unit"))
+  
+  did.reg <- plm(
+    outcome ~ treatment_time * treatment_zip, 
+    data = panel,
+    model = "within",
+  )
+  
+  ct <- coeftest(did.reg, vcov=function(x) vcovDC(x, type="HC1"))
+  coefficient <- ct[2,1]
+  ci <- confint(ct)[2,]
+  
+  post_treatment_coefficients <- append(post_treatment_coefficients, coefficient)
+  post_treatment_ci_lower <- append(post_treatment_ci_lower, ci[1])
+  post_treatment_ci_upper <- append(post_treatment_ci_upper, ci[2])
+}
+
+post_treatment_plot <- tibble(
+  Time = periods[seq((length(periods) - length(post_treatment_coefficients) - 1), length(periods) - 2)],
+  Estimate = post_treatment_coefficients,
+  CI_lower = post_treatment_ci_lower,
+  CI_upper = post_treatment_ci_upper
+) %>%
+  bind_rows(pre_treatment_plot)
+```
+
+```{r}
+combined_plot <- tibble(
+  Time = periods[seq((length(periods) - length(post_treatment_coefficients) - 1), length(periods) - 2)],
+  Estimate = post_treatment_coefficients,
+  CI_lower = post_treatment_ci_lower,
+  CI_upper = post_treatment_ci_upper,
+  Group = "Including Post-Treatment Periods",
+  color = "post"
+) %>%
+  bind_rows(
+    pre_treatment_plot %>%
+      mutate(Group = "Including Post-Treatment Periods", color = "pre")
+  ) %>%
+  bind_rows(
+    pre_treatment_plot %>%
+      mutate(Group = "Excluding Post-Treatment Periods", color = "pre")
+  )
+
+ggplot(combined_plot, aes(x = Time, y = Estimate, color = color) ) +
+  geom_point() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2) +
+  theme_bw() +
+  facet_wrap(~Group, scales = "free_x") +
+  geom_hline(yintercept = 0, lty = 2) +
+  scale_color_manual(values = c("darkgreen", "black")) +
+  guides(color = FALSE)
+```
+
+# S3 Appendix Figure 1
+
+```{r}
+config <- yaml.load_file("ht_assignment_config.yaml") # redacted
+
+CASE_DATES <- seq(
+  from = as.Date(config$end_date) - 6,
+  to = as.Date(config$end_date),
+  by = "days"
+)
+
+WEEK_OF <- as.Date(cut(Sys.Date(), "week")) + 7
+
+scc_ltcf <- read_rds("scc_ltcf.rds") # redacted
+```
+
+```{r}
+scc_zip_svi <- read_rds("scc_zip_svi.rds") %>%
+  pivot_wider(id_cols = "zip", names_from = "Names", values_from = "Values") %>%
+  filter(perc_area_in_scc > 0)
+
+scc_zip_svi <-
+  lapply(scc_zip_svi, function(a) ifelse(is.nan(a) | is.na(a), 0, a)) %>%
+  as_tibble()
+```
+
+```{r}
+cict_all <- read_csv("cict_combined.csv") %>%
+  mutate(
+    across(everything(), ~ iconv(., from = "UTF-8", to = "ASCII//TRANSLIT")),
+    Address.Text <- toupper(Address.Text)
+  )
+
+calconnect_cases_in_last_7_days <- cict_all %>%
+  filter(
+    Person.Account..Mailing.Zip.Postal.Code.. %in% scc_zip_svi$zip &
+    as.Date(Opened.Date, format = "%m/%d/%Y") %in% CASE_DATES
+  )
+
+calconnect_cases_in_last_7_days$duplicate_household <- sapply(
+  calconnect_cases_in_last_7_days$Household,
+  duplicate_household_exists,
+  CASE_DATES[length(CASE_DATES)],
+  cict_all
+)
+
+calconnect_cases_in_last_7_days$duplicate_address <- sapply(
+  calconnect_cases_in_last_7_days$Address.Text,
+  duplicate_address_exists,
+  CASE_DATES[length(CASE_DATES)],
+  cict_all
+)
+
+calconnect_cases_in_last_7_days <- calconnect_cases_in_last_7_days %>%
+  filter(!duplicate_household & !duplicate_address) %>%
+  group_by(Person.Account..Mailing.Zip.Postal.Code..) %>%
+  summarize(
+    num_calconnect_cases = n(),
+  ) %>%
+  rename(zip = Person.Account..Mailing.Zip.Postal.Code..)
+```
+
+```{r}
+tests <- read_csv(config$tests_subset_filepath) %>%
+  left_join(
+    map_tests_parcels %>%
+      mutate(IncidentID = ID)
+  ) %>%
+  filter(!(CAL_ADDRESS %in% scc_ltcf$`Facility Address`))
+
+tests_in_last_7_days <- tests %>% mutate(
+  DATE = case_when(
+      !is.na(DtSpecimenCollect_Final) ~ DtSpecimenCollect_Final,
+      !is.na(DtLabCollect) ~ as.Date(DtLabCollect, format = "%m/%d/%Y"),
+      TRUE ~ as.Date(DtLabResult, format = "%m/%d/%Y")
+    ),
+  Residential_Zip = as.character(Residential_Zip)
+  ) %>%
+  filter(
+    DATE %in% CASE_DATES &
+    Residential_Zip %in% scc_zip_svi$zip
+  ) %>%
+  group_by(Residential_Zip) %>%
+  summarize(
+      n_positives = sum(ResultsClean == "POSITIVE"),
+      n_negatives = sum(ResultsClean == "NEGATIVE"),
+      positivity_rate_perc = 100 * n_positives / (n_positives + n_negatives)
+  ) %>%
+  rename(zip = Residential_Zip) %>%
+  select(zip, positivity_rate_perc)
+```
+
+
+```{r}
+res <- scc_zip_svi %>%
+  left_join(calconnect_cases_in_last_7_days, by = "zip") %>%
+  left_join(tests_in_last_7_days, by = "zip") %>%
+  mutate(
+    num_calconnect_cases = ifelse(
+      is.na(num_calconnect_cases),
+      0,
+      num_calconnect_cases
+    ),
+    positivity_rate_perc = ifelse(
+      is.na(positivity_rate_perc),
+      0,
+      positivity_rate_perc
+    ),
+    pop_in_scc = POP * perc_area_in_scc,
+  ) %>%
+  select(zip, num_calconnect_cases, positivity_rate_perc, pop_in_scc, SVI)
+```
+
+
+```{r}
+res_fig <- res %>%
+  left_join(
+    assignments %>%
+      filter(Week_Of == "2021-03-29") %>%
+      select(zip = Zip, Type)
+  ) %>%
+  mutate(
+    `Always Eligible` = ifelse(zip %in% always_eligible_zips, "Always Eligible", ""),
+    `ZIP Code Type` = ifelse(
+      !(zip %in% priority_zips$zip),
+      "Ineligible",
+      ifelse(
+        Type == "ASSIGNMENT",
+        "Eligible, Assigned",
+        "Eligible, Control"
+      )
+    )
+  )
+```
+
+```{r}
+annotations <- data.frame(
+        X = c(Inf),
+        Y =  c(Inf),
+        text = c("Top %"),
+        x_adjust = c(1.25),
+        y_adjust = c(1.5)
+)
+ 
+ggplot(res_fig) +
+  geom_segment(aes(x = SVI_floor, y = positivity_rate_perc_floor, xend = Inf, yend = positivity_rate_perc_floor), linetype = "dashed") +
+  geom_segment(aes(x = SVI_floor, y = positivity_rate_perc_floor, xend = SVI_floor, yend = Inf), linetype = "dashed") +
+  geom_point(aes(x = SVI, y = positivity_rate_perc, color = `ZIP Code Type`, size = num_positive_calredie_cases), alpha = 0.75) +
+  geom_point(aes(x = SVI, y = positivity_rate_perc, size = num_positive_calredie_cases, alpha = `Always Eligible`), shape = 21, color = "black", stroke = 1) +
+  scale_alpha_discrete(breaks="Always Eligible", name = NULL, range = c(0, 0.75)) +
+  labs(
+    title = "High Touch Assignment Scheme",
+    x = "SVI", y = "Positivity Rate (%)",
+    size = "Case Count"
+  ) +
+  guides(color = guide_legend(order = 1), alpha = guide_legend(order = 2), size = guide_legend(order = 3)) +
+  geom_text(data=annotations, aes(x=X,y=Y,hjust=x_adjust,vjust=y_adjust,label=text)) +
+  theme_bw() +
+  theme(legend.spacing.y = unit(0.05, 'cm'))
+```
+
+# S3 Appendix Figure 2
+
+```{r}
+cict1 <- read_csv("cict_combined.csv") %>% # redacted
+  distinct(Record.Number, .keep_all = T) %>%
+  select(
+    Record.Number,
+    Account.ID,
+    Opened.Date,
+    CalREDIE.Incident.ID..,
+    Record.Owner,
+    Person.Account..First.Name..,
+    Person.Account..Last.Name..,
+    Person.Account..Birthdate..,
+    Person.Account..Mailing.Street..,
+    Apartment.Number..,
+    Person.Account..Mailing.Zip.Postal.Code..,
+    Person.Account..Gender..,
+    Person..Hispanic..,
+    Race.and.Ethnicity,
+    Initial.Interview.Outcome,
+    If.yes..total.number.of.close.contacts.
+  ) %>%
+  mutate(
+    Opened.Date = as.Date(Opened.Date, format = "%m/%d/%Y"),
+    Week_Of = as.Date(cut(Opened.Date, "week")),
+    Person.Account..Mailing.Zip.Postal.Code.. = as.character(
+      Person.Account..Mailing.Zip.Postal.Code..
+    ),
+  ) %>%
+  rename(Zip = Person.Account..Mailing.Zip.Postal.Code..) %>%
+  left_join(assignments, by = c("Week_Of", "Zip")) %>%
+  filter(Zip %in% JDOC_ZIP) %>%
+  filter(is.na(always_assigned) | !always_assigned) %>%
+  mutate(
+    D = ifelse(Record.Owner %in% high_touch_staff, 1, 0),
+    Z = ifelse(Type == "ASSIGNMENT", 1, 0),
+    completed_interview = !is.na(Initial.Interview.Outcome) & Initial.Interview.Outcome == "Completed",
+    refused_interview = !is.na(Initial.Interview.Outcome) & Initial.Interview.Outcome == "Refused to interview",
+    num_close_contacts = ifelse(If.yes..total.number.of.close.contacts. == 999, NA, If.yes..total.number.of.close.contacts.)
+  )
+```
+
+```{r}
+cict2 <- read_csv("cict_combined.csv") %>% # redacted
+  distinct(Record.Number, .keep_all = T) %>%
+  select(
+    Record.Number,
+    Account.ID,
+    Opened.Date,
+    CalREDIE.Incident.ID..,
+    Record.Owner,
+    Person.Account..First.Name..,
+    Person.Account..Last.Name..,
+    Person.Account..Birthdate..,
+    Person.Account..Mailing.Street..,
+    Apartment.Number..,
+    Person.Account..Mailing.Zip.Postal.Code..,
+    Person.Account..Gender..,
+    Person..Hispanic..,
+    Race.and.Ethnicity,
+    Initial.Interview.Outcome,
+    If.yes..total.number.of.close.contacts.
+  ) %>%
+  mutate(
+    Opened.Date = as.Date(Opened.Date, format = "%m/%d/%Y"),
+    Week_Of = as.Date(cut(Opened.Date, "week")),
+    Person.Account..Mailing.Zip.Postal.Code.. = as.character(
+      Person.Account..Mailing.Zip.Postal.Code..
+    ),
+  ) %>%
+  rename(Zip = Person.Account..Mailing.Zip.Postal.Code..) %>%
+  left_join(assignments, by = c("Week_Of", "Zip")) %>%
+  mutate(
+    D = ifelse(Record.Owner %in% high_touch_staff, 1, 0),
+    Z = ifelse(Type == "ASSIGNMENT", 1, 0), 
+    completed_interview = !is.na(Initial.Interview.Outcome) & Initial.Interview.Outcome == "Completed",
+    refused_interview = !is.na(Initial.Interview.Outcome) & Initial.Interview.Outcome == "Refused to interview",
+    num_close_contacts = ifelse(If.yes..total.number.of.close.contacts. == 999, NA, If.yes..total.number.of.close.contacts.)
+  )
+```
+
+```{r}
+cict_facet <- cict1 %>% 
+  mutate(group = "Main analysis cases") %>% 
+  rbind(
+    cict2 %>% 
+      mutate(group = "All cases")
+  )
+```
+
+```{r}
+cict_facet %>%
+  filter(Week_Of >= as.Date("2021-02-15"), Week_Of <= as.Date("2021-05-17")) %>%
+  group_by(Week_Of, Z, group) %>%
+  filter(!is.na(Z),!is.na(Person.Account..Birthdate..)) %>%
+  summarize(
+    p_treatment = mean(D, na.rm = T),
+    n = n()
+  ) %>%
+  mutate(Z = as.factor(Z)) %>%
+  ggplot() +
+  geom_line(aes(x = Week_Of, y = p_treatment, group = Z, color = Z)) +
+  geom_point(aes(x = Week_Of, y = p_treatment, size = n, color = Z), alpha = 0.75) +
+  scale_color_manual(values = c("#00bfc4", "#f8766d")) +
+  labs(x = "Week case opened", y = "Probability of treatment", color = "Assigned ZIP Code", size = "Assigned case count") +
+  theme_bw() +
+  facet_grid(rows = vars(group))
+```
+
+# S3 Appendix Table 1
+
+```{r}
+df_cace_all <- evaluation_data %>%
+  filter(
+    !is.na(Z)
+  ) %>% 
+  filter(
+    !is.na(Person.Account..Birthdate..),
+  ) %>% 
+  mutate(
+    male = ifelse(Person.Account..Gender.. == "Male", 1, 0),
+    female = ifelse(Person.Account..Gender.. == "Female", 1, 0),
+    unknown_other = ifelse(
+      Person.Account..Gender.. != "Male" & Person.Account..Gender.. != "Female", 1, 0
+    ),
+    hispanic = ifelse(Person..Hispanic.. == "Hispanic or Latino", 1, 0),
+    white = ifelse(Race.and.Ethnicity == "White", 1, 0),
+    asian = ifelse(Race.and.Ethnicity == "Asian", 1, 0),
+    black = ifelse(Race.and.Ethnicity == "Black or African American", 1, 0),
+    not_reported = ifelse(Race.and.Ethnicity == "Unknown", 1, 0),
+    multirace_other = ifelse(Race.and.Ethnicity == "Multi-race" | Race.and.Ethnicity == "Other", 1, 0),
+    age = age_calc(
+      dob = as.Date(Person.Account..Birthdate.., format = "%m/%d/%Y"),
+      enddate = as.Date("2021-05-23"),
+      units = "years"
+    ),
+    age_0_17 = ifelse(age < 18, 1, 0),
+    age_18_24 = ifelse(age >= 18 & age < 25, 1, 0),
+    age_25_44 = ifelse(age >= 25 & age < 45, 1, 0),
+    age_45_64 = ifelse(age >= 45 & age < 65, 1, 0),
+    age_65_plus = ifelse(age >= 65, 1, 0),
+    ZIP_Week = paste(Zip, Week_Of)
+  ) %>% 
+  filter_at(all_of(balance_variables), all_vars(!is.na(.)))
+```
+
+```{r}
+balance_df_all <- df_cace_all %>%
+  filter(
+    !is.na(Z),
+    !is.na(Person.Account..Birthdate..),
+  ) %>%
+  mutate(
+    male = ifelse(Person.Account..Gender.. == "Male", 1, 0),
+    female = ifelse(Person.Account..Gender.. == "Female", 1, 0),
+    unknown_other = ifelse(
+      Person.Account..Gender.. != "Male" & Person.Account..Gender.. != "Female", 1, 0
+    ),
+    hispanic = ifelse(Person..Hispanic.. == "Hispanic or Latino", 1, 0),
+    white = ifelse(Race.and.Ethnicity == "White", 1, 0),
+    asian = ifelse(Race.and.Ethnicity == "Asian", 1, 0),
+    black = ifelse(Race.and.Ethnicity == "Black or African American", 1, 0),
+    not_reported = ifelse(Race.and.Ethnicity == "Unknown", 1, 0),
+    multirace_other = ifelse(Race.and.Ethnicity == "Multi-race" | Race.and.Ethnicity == "Other", 1, 0),
+    age = age_calc(
+      dob = as.Date(Person.Account..Birthdate.., format = "%m/%d/%Y"),
+      enddate = as.Date("2021-05-23"),
+      units = "years"
+    ),
+    age_0_17 = ifelse(age < 18, 1, 0),
+    age_18_24 = ifelse(age >= 18 & age < 25, 1, 0),
+    age_25_44 = ifelse(age >= 25 & age < 45, 1, 0),
+    age_45_64 = ifelse(age >= 45 & age < 65, 1, 0),
+    age_65_plus = ifelse(age >= 65, 1, 0)
+  ) %>%
+  filter_at(all_of(balance_variables), all_vars(!is.na(.))) %>%
+  select(Week_Of, Z, all_of(balance_variables))
+
+t_tests <- tibble(mean_control=c(), mean_treatment=c(), p.value=c(), ci_lower = c(), ci_upper = c())
+for (covariate in balance_variables) {
+  tt <- t.test(balance_df_all[[covariate]][balance_df_all$Z==0], balance_df_all[[covariate]][balance_df_all$Z==1], var.equal=F)
+    
+  t_tests <- rbind(t_tests, tibble(mean_control=c(tt$estimate[1]), mean_treatment=c(tt$estimate[2]), p.value=c(tt$p.value), ci_lower = c(tt$conf.int[1]), ci_upper = c(tt$conf.int[2])))
+}
+
+bal_tab <- matrix(NaN, nrow = length(balance_variables), ncol = 5)
+colnames(bal_tab) <- c("mean (Z=0)", "mean (Z=1)", "ci_lower", "ci_upper", "p-val")
+rownames(bal_tab) <- balance_variables
+
+for (i in seq_along(balance_variables)) {
+  bal_tab[i,] <- c(t_tests[i,]$mean_control, t_tests[i,]$mean_treatment, t_tests[i,]$ci_lower, t_tests[i,]$ci_upper, t_tests[i,]$p.value)
+}
+
+bal_tab %>% round(digits = 3)
+```
+
+# S3 Appendix Table 2
+
+ITT
+
+```{r}
+# calculate treatment effect estimate for variables of interest
+get_treatment_effect <- function(df, variable_str){
+  
+  lm_fit <- lm(
+    as.formula(paste0(variable_str, "~ Z + factor(Week_Of)")),
+    data = df
+  )
+  
+  mod <- coeftest(lm_fit, vcovCR(lm_fit, cluster = df$ZIP_Week, type = "CR2"))
+  
+  ate_hat = mod[2,1]
+  se_hat = mod[2,2]
+  p_val = mod[2,4]
+  
+  c <- 1.96
+  ci_up <- ate_hat + c * se_hat
+  ci_lo <- ate_hat - c * se_hat
+  
+  return(
+    tibble(
+      ate_hat = c(ate_hat),
+      se_hat = c(se_hat),
+      p_val = c(p_val),
+      ci_lo = c(ci_lo),
+      ci_up = c(ci_up)
+    )
+  )
+  
+}
+
+as_randomized_res <- NULL
+for (variable in outcome_variables) {
+  as_randomized_res <- rbind(
+    as_randomized_res,
+    get_treatment_effect(
+      df_cace_all,
+      variable
+    )
+  )
+}
+# create balance table template
+res_tab <- matrix(NaN, nrow = length(outcome_variables), ncol = 5)
+colnames(res_tab) <- c("effect", "se", "p_val", "ci_lo", "ci_up")
+rownames(res_tab) <- outcome_variables
+
+# fill in results
+for (i in seq_along(outcome_variables)) {
+    res_tab[i,] <- c(as_randomized_res[i,]$mu_0, as_randomized_res[i,]$mu_1, as_randomized_res[i,]$ate_hat, as_randomized_res[i,]$se_hat, as_randomized_res[i,]$p_val, as_randomized_res[i,]$ci_lo, as_randomized_res[i,]$ci_up)
+}
+
+# formatting
+res_tab %>% round(digits = 4) %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  arrange(desc(effect)) %>% 
+  transmute(
+    rowname,
+    effect = effect *100,
+    se = se*100,
+    ci = paste0("[",ci_lo*100,", ",ci_up*100,"]"),
+    p_val = round(p_val,6)
+  )
+```
+
+IV
+
+```{r}
+# first stage results
+# lm_robust uses same robust standard error estimator as iv_robust (HC2)
+# see: https://www.rdocumentation.org/packages/estimatr/versions/0.30.2/topics/iv_robust
+mod_fs <- lm_robust(D ~ Z, fixed_effects = ~ Week_Of, clusters = Week_Of, data = df_cace_all)
+summary(mod_fs)
+
+# test for weak instrument
+# basic rule of thumb (except in small samples) is F-statistic > 10 for a 'relevant' instrument (i.e. Z has a non-zero "effect" on D)
+mod_1 <- lm(D ~ Z + factor(Week_Of), data = df_cace_all)
+mod_0 <- lm(D ~ factor(Week_Of), data = df_cace_all)
+waldtest(mod_1, mod_0, vcov = vcovCR(mod_1, cluster = df_cace_all$ZIP_Week, type = "CR2"))
+
+cace_res <- NULL
+
+for (variable in outcome_variables) {
+  # control for imbalanced variables
+  mod <- iv_robust(
+    as.formula(paste0(variable, " ~ D + ", str_c(balance_variables, collapse = " + "), " | Z + ", str_c(balance_variables, collapse = " + "))),
+    data = df_cace_all,
+    clusters = ZIP_Week,
+    fixed_effects = ~ Week_Of
+  )
+  ate_hat <- mod$coefficients[1]
+  se_hat <- mod$std.error[1]
+  p_val <- mod$p.value[1]
+  ci_low <- mod$conf.low[1]
+  ci_high = mod$conf.high[1]
+  
+  cace_res <- rbind(
+    cace_res,
+    tibble(
+      effect=c(ate_hat),
+      se=c(se_hat),
+      p_val = c(p_val),
+      ci_low = c(ci_low),
+      ci_high = c(ci_high)
+    )
+  )
+}
+
+# create balance table template
+res_tab <- matrix(NaN, nrow = length(outcome_variables), ncol = 5)
+colnames(res_tab) <- c("effect", "se", "p_val", "ci (low)", "ci (high)")
+rownames(res_tab) <- outcome_variables
+
+# fill in results
+for (i in seq_along(outcome_variables)) {
+    res_tab[i,] <- c(
+      cace_res[i,]$effect,
+      cace_res[i,]$se,
+      cace_res[i,]$p_val,
+      cace_res[i,]$ci_low,
+      cace_res[i,]$ci_high
+    )
+}
+
+# formatting
+res_tab %>% 
+  round(digits = 4) %>% 
+  as.data.frame() %>% 
+  arrange(desc(effect)) %>% 
+  transmute(
+    effect = effect *100,
+    se = se*100,
+    ci = paste0("[",`ci (low)`*100,", ",`ci (high)`*100,"]"),
+    p_val = round(p_val,3)
+  )
+```
+
+# S3 Appendix Table 3
+
+```{r}
+logit <- glm(
+  as.formula(paste0("had_referral", "~ Z + factor(Week_Of) + ", paste0(balance_variables, collapse = " + "))),
+  data = df_cace
+)
+
+exp(cbind(OR = coef(logit), confint(logit)))
+```
+
+```{r}
+get_treatment_effect <- function(df, variable_str){
+  
+  lm_fit <- glm(
+    as.formula(paste0(variable_str, "~ Z + factor(Week_Of) + ", paste0(balance_variables, collapse = " + "))),
+    data = df_cace
+  )
+  
+  mod <- coeftest(lm_fit, vcovCR(lm_fit, cluster = df$ZIP_Week, type = "CR2"))
+
+  ate_hat = mod[2,1]
+  se_hat = mod[2,2]
+  p_val = mod[2,4]
+  
+  c <- 1.96
+  ci_up <- ate_hat + c * se_hat
+  ci_lo <- ate_hat - c * se_hat
+  
+  return(
+    tibble(
+      ate_hat = c(ate_hat),
+      se_hat = c(se_hat),
+      p_val = c(p_val),
+      ci_lo = c(ci_lo),
+      ci_up = c(ci_up)
+    )
+  )
+  
+}
+
+as_randomized_res <- NULL
+for (variable in outcome_variables) {
+  as_randomized_res <- rbind(
+    as_randomized_res,
+    get_treatment_effect(
+      df_cace,
+      variable
+    )
+  )
+}
+
+# create balance table template
+res_tab <- matrix(NaN, nrow = length(outcome_variables), ncol = 5)
+colnames(res_tab) <- c("effect", "se", "p_val", "ci_lo", "ci_up")
+rownames(res_tab) <- outcome_variables
+
+# fill in results
+for (i in seq_along(outcome_variables)) {
+    res_tab[i,] <- c(as_randomized_res[i,]$mu_0, as_randomized_res[i,]$mu_1, as_randomized_res[i,]$ate_hat, as_randomized_res[i,]$se_hat, as_randomized_res[i,]$p_val, as_randomized_res[i,]$ci_lo, as_randomized_res[i,]$ci_up)
+}
+
+# formatting
+res_tab %>% round(digits = 4) %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  arrange(desc(effect)) %>% 
+  transmute(
+    rowname,
+    effect = exp(effect) %>% round(digits = 4),
+    se = exp(se) %>% round(digits = 4),
+    ci = paste0("[",exp(ci_lo) %>% round(digits = 4),", ",exp(ci_up) %>% round(digits = 4),"]"),
+    p_val = round(p_val,6)
+  )
+```
+
+# S4 Appendix Figure 1
+
+```{r}
+risk_level_res <- read_csv("ht_survey_risk_level_responses.csv") %>% # redacted
+  rename(`No high-touch services` = `No high touch services`) %>%
+  pivot_longer(everything()) %>%
+  mutate(
+    name = ordered(name, levels = c("No high-touch services", "Low risk", "Medium risk", "High risk"))
+  )
+
+engagement_res <- read_csv("ht_survey_engagement_responses.csv") %>% # redacted
+  pivot_longer(everything()) %>%
+  mutate(
+    name = ordered(name, levels = c("Little to no engagement", "Moderate engagement", "High engagement"))
+  )
+```
+
+```{r}
+risk_plot <- ggplot(risk_level_res, aes(x = name, y = value)) +
+  geom_boxplot() +
+  labs(
+    x = "Risk level",
+    y = "% of clients",
+    title = "Estimated risk level distribution"
+  ) +
+  theme_bw() +
+  ylim(0, 85)
+
+engagement_plot <- ggplot(engagement_res, aes(x = name, y = value)) +
+  geom_boxplot() +
+  labs(
+    x = "Engagement level",
+    y = "% of clients",
+    title = "Estimated engagement level distribution"
+  ) +
+  theme_bw() +
+  ylim(0, 85)
+
+ggarrange(risk_plot, engagement_plot + rremove("ylab"), ncol = 2, nrow = 1)
+```
